@@ -6,15 +6,16 @@ import uuid
 import gradio as gr
 
 
+
 embedding_model = SentenceTransformer(
     "all-MiniLM-L6-v2"
 )
 
-generator = pipeline(
-    "text2text-generation",
-    model="google/flan-t5-base"
-)
 
+generator = pipeline(
+    "text-generation",
+    model="HuggingFaceTB/SmolLM2-360M-Instruct"
+)
 
 
 client = chromadb.Client()
@@ -32,25 +33,36 @@ collection = client.create_collection(
 )
 
 
-def chunk_text(
-    text,
-    chunk_size=500,
-    overlap=100
-):
+def chunk_text(text, chunk_size=3):
+
+    sentences = text.split(".")
 
     chunks = []
 
-    start = 0
+    current_chunk = []
 
-    while start < len(text):
+    for sentence in sentences:
 
-        end = start + chunk_size
+        sentence = sentence.strip()
 
-        chunk = text[start:end]
+        if sentence:
 
-        chunks.append(chunk)
+            current_chunk.append(sentence)
 
-        start += chunk_size - overlap
+        if len(current_chunk) >= chunk_size:
+
+            chunks.append(
+                ". ".join(current_chunk)
+            )
+
+            current_chunk = []
+
+    # Add remaining sentences
+    if current_chunk:
+
+        chunks.append(
+            ". ".join(current_chunk)
+        )
 
     return chunks
 
@@ -79,7 +91,8 @@ def process_pdf(pdf_file):
         extracted_text = page.extract_text()
 
         if extracted_text:
-            text += extracted_text
+
+            text += extracted_text + " "
 
     # Create chunks
     chunks = chunk_text(text)
@@ -114,14 +127,14 @@ def process_pdf(pdf_file):
         f"Total Chunks: {len(chunks)}"
     )
 
-
 def ask_question(question):
 
-    # Check if PDF is uploaded
+    # Check if PDF exists
     if collection.count() == 0:
+
         return "Please upload and process a PDF first."
 
-    # Create query embedding
+    # Create question embedding
     query_embedding = embedding_model.encode(
         [question]
     ).tolist()
@@ -129,7 +142,7 @@ def ask_question(question):
     # Retrieve relevant chunks
     results = collection.query(
         query_embeddings=query_embedding,
-        n_results=3
+        n_results=5
     )
 
     retrieved_docs = results["documents"][0]
@@ -137,9 +150,15 @@ def ask_question(question):
     # Combine retrieved chunks
     context = " ".join(retrieved_docs)
 
-    # Create prompt for LLM
+    # Better Prompt
     prompt = f"""
-    Answer the question based on the context below.
+    You are an intelligent AI assistant.
+
+    Answer the question clearly and concisely
+    using only the provided context.
+
+    If the answer is not available in the context,
+    say "Answer not found in document."
 
     Context:
     {context}
@@ -147,20 +166,24 @@ def ask_question(question):
     Question:
     {question}
 
-    Answer:
+    Helpful Answer:
     """
 
     # Generate answer
     response = generator(
         prompt,
-        max_length=200,
-        do_sample=True,
-        temperature=0.7
+        max_new_tokens=120,
+        do_sample=False,
+        temperature=0.2
     )
 
     answer = response[0]["generated_text"]
 
+# Remove prompt from output
+    answer = answer.replace(prompt, "").strip()
+
     return answer
+
 
 
 with gr.Blocks() as demo:
@@ -210,5 +233,7 @@ with gr.Blocks() as demo:
             inputs=question_input,
             outputs=answer_output
         )
+
+
 
 demo.launch()
