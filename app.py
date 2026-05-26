@@ -1,14 +1,20 @@
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 import chromadb
 import uuid
 import gradio as gr
 
-# -----------------------------------
-# Load Embedding Model
-# -----------------------------------
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
+embedding_model = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
+
+generator = pipeline(
+    "text2text-generation",
+    model="google/flan-t5-base"
+)
+
 
 
 client = chromadb.Client()
@@ -21,7 +27,32 @@ try:
 except:
     pass
 
-collection = client.create_collection(name=collection_name)
+collection = client.create_collection(
+    name=collection_name
+)
+
+
+def chunk_text(
+    text,
+    chunk_size=500,
+    overlap=100
+):
+
+    chunks = []
+
+    start = 0
+
+    while start < len(text):
+
+        end = start + chunk_size
+
+        chunk = text[start:end]
+
+        chunks.append(chunk)
+
+        start += chunk_size - overlap
+
+    return chunks
 
 
 def process_pdf(pdf_file):
@@ -34,8 +65,11 @@ def process_pdf(pdf_file):
     except:
         pass
 
-    collection = client.create_collection(name=collection_name)
+    collection = client.create_collection(
+        name=collection_name
+    )
 
+    # Read PDF
     reader = PdfReader(pdf_file.name)
 
     text = ""
@@ -48,15 +82,25 @@ def process_pdf(pdf_file):
             text += extracted_text
 
     # Create chunks
-    chunks = text.split(".")
+    chunks = chunk_text(text)
 
-    chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+    # Remove empty chunks
+    chunks = [
+        chunk.strip()
+        for chunk in chunks
+        if chunk.strip()
+    ]
 
     # Create embeddings
-    embeddings = model.encode(chunks).tolist()
+    embeddings = embedding_model.encode(
+        chunks
+    ).tolist()
 
     # Generate IDs
-    ids = [str(uuid.uuid4()) for _ in range(len(chunks))]
+    ids = [
+        str(uuid.uuid4())
+        for _ in range(len(chunks))
+    ]
 
     # Store in ChromaDB
     collection.add(
@@ -65,13 +109,24 @@ def process_pdf(pdf_file):
         embeddings=embeddings
     )
 
-    return f"PDF Processed Successfully\nTotal Chunks: {len(chunks)}"
+    return (
+        f"PDF Processed Successfully\n"
+        f"Total Chunks: {len(chunks)}"
+    )
 
 
 def ask_question(question):
 
-    query_embedding = model.encode([question]).tolist()
+    # Check if PDF is uploaded
+    if collection.count() == 0:
+        return "Please upload and process a PDF first."
 
+    # Create query embedding
+    query_embedding = embedding_model.encode(
+        [question]
+    ).tolist()
+
+    # Retrieve relevant chunks
     results = collection.query(
         query_embeddings=query_embedding,
         n_results=3
@@ -79,27 +134,54 @@ def ask_question(question):
 
     retrieved_docs = results["documents"][0]
 
-    final_result = ""
+    # Combine retrieved chunks
+    context = " ".join(retrieved_docs)
 
-    for i, doc in enumerate(retrieved_docs):
+    # Create prompt for LLM
+    prompt = f"""
+    Answer the question based on the context below.
 
-        final_result += f"Result {i+1}:\n{doc}\n\n"
+    Context:
+    {context}
 
-    return final_result
+    Question:
+    {question}
 
+    Answer:
+    """
+
+    # Generate answer
+    response = generator(
+        prompt,
+        max_length=200,
+        do_sample=True,
+        temperature=0.7
+    )
+
+    answer = response[0]["generated_text"]
+
+    return answer
 
 
 with gr.Blocks() as demo:
 
-    gr.Markdown("# PDF Question Answering System")
+    gr.Markdown(
+        "# PDF Question Answering System using RAG"
+    )
 
     with gr.Tab("Upload PDF"):
 
-        pdf_input = gr.File(label="Upload PDF")
+        pdf_input = gr.File(
+            label="Upload PDF"
+        )
 
-        upload_output = gr.Textbox(label="Status")
+        upload_output = gr.Textbox(
+            label="Status"
+        )
 
-        upload_button = gr.Button("Process PDF")
+        upload_button = gr.Button(
+            "Process PDF"
+        )
 
         upload_button.click(
             fn=process_pdf,
@@ -110,15 +192,18 @@ with gr.Blocks() as demo:
     with gr.Tab("Ask Questions"):
 
         question_input = gr.Textbox(
-            label="Ask Question"
+            label="Ask Question",
+            placeholder="Ask anything from the PDF..."
         )
 
         answer_output = gr.Textbox(
-            label="Retrieved Chunks",
+            label="Generated Answer",
             lines=10
         )
 
-        ask_button = gr.Button("Search")
+        ask_button = gr.Button(
+            "Get Answer"
+        )
 
         ask_button.click(
             fn=ask_question,
